@@ -16,9 +16,12 @@ import ast
 import datetime as _dt
 import json
 import operator as _op
+import socket
 from dataclasses import dataclass
 from typing import Any, Callable
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
+import httpx
 
 
 @dataclass(frozen=True, slots=True)
@@ -87,6 +90,170 @@ def calculate(expression: str) -> str:
     return f"{expression} = {result}"
 
 
+# Weather is fetched from Open-Meteo (https://open-meteo.com): free, no API key.
+# We first geocode the place name to coordinates, then ask for current weather.
+_GEOCODE_URL = "https://geocoding-api.open-meteo.com/v1/search"
+_FORECAST_URL = "https://api.open-meteo.com/v1/forecast"
+_WEATHER_HTTP_TIMEOUT = 10.0
+
+# WMO weather interpretation codes -> human-readable text.
+_WEATHER_CODES: dict[int, str] = {
+    0: "clear sky",
+    1: "mainly clear",
+    2: "partly cloudy",
+    3: "overcast",
+    45: "fog",
+    48: "depositing rime fog",
+    51: "light drizzle",
+    53: "moderate drizzle",
+    55: "dense drizzle",
+    56: "light freezing drizzle",
+    57: "dense freezing drizzle",
+    61: "slight rain",
+    63: "moderate rain",
+    65: "heavy rain",
+    66: "light freezing rain",
+    67: "heavy freezing rain",
+    71: "slight snowfall",
+    73: "moderate snowfall",
+    75: "heavy snowfall",
+    77: "snow grains",
+    80: "slight rain showers",
+    81: "moderate rain showers",
+    82: "violent rain showers",
+    85: "slight snow showers",
+    86: "heavy snow showers",
+    95: "thunderstorm",
+    96: "thunderstorm with slight hail",
+    99: "thunderstorm with heavy hail",
+}
+
+
+def get_weather(location: str, units: str = "metric") -> str:
+    """Return the current weather for a place name (e.g. 'Tokyo', 'Paris, France').
+
+    ``units`` is 'metric' (°C, km/h) or 'imperial' (°F, mph).
+    """
+    location = (location or "").strip()
+    if not location:
+        return "Please provide a location, e.g. 'London' or 'Austin, Texas'."
+
+    imperial = units.strip().lower() in {"imperial", "us", "f", "fahrenheit"}
+    temp_unit = "°F" if imperial else "°C"
+    wind_unit = "mph" if imperial else "km/h"
+
+    try:
+        with httpx.Client(timeout=_WEATHER_HTTP_TIMEOUT) as client:
+            place = _geocode(client, location)
+            if place is None:
+                return f"Could not find a place called {location!r}. Try adding a country, e.g. 'Paris, France'."
+
+            params = {
+                "latitude": place["latitude"],
+                "longitude": place["longitude"],
+                "current": "temperature_2m,relative_humidity_2m,apparent_temperature,"
+                "weather_code,wind_speed_10m",
+                "temperature_unit": "fahrenheit" if imperial else "celsius",
+                "wind_speed_unit": "mph" if imperial else "kmh",
+            }
+            resp = client.get(_FORECAST_URL, params=params)
+            resp.raise_for_status()
+            current = resp.json().get("current", {})
+    except httpx.TimeoutException:
+        return "The weather service timed out. Please try again."
+    except httpx.HTTPError as exc:
+        return f"Could not reach the weather service: {exc}"
+
+    code = current.get("weather_code")
+    conditions = _WEATHER_CODES.get(code, f"weather code {code}")
+    return (
+        f"Current weather in {place['label']}: {conditions}, "
+        f"{current.get('temperature_2m')}{temp_unit} "
+        f"(feels like {current.get('apparent_temperature')}{temp_unit}), "
+        f"humidity {current.get('relative_humidity_2m')}%, "
+        f"wind {current.get('wind_speed_10m')} {wind_unit}."
+    )
+
+
+def _geocode(client: httpx.Client, location: str) -> dict[str, Any] | None:
+    """Resolve a place name to coordinates plus a friendly label, or None.
+
+    Open-Meteo's geocoder matches a single name, so "Austin, Texas" finds
+    nothing. We try the full string first, then fall back to just the part
+    before the first comma (the city).
+    """
+    candidates = [location]
+    if "," in location:
+        candidates.append(location.split(",", 1)[0].strip())
+
+    results = None
+    for name in candidates:
+        resp = client.get(_GEOCODE_URL, params={"name": name, "count": 1})
+        resp.raise_for_status()
+        results = resp.json().get("results")
+        if results:
+            break
+    if not results:
+        return None
+    top = results[0]
+    label = ", ".join(
+        part for part in (top.get("name"), top.get("admin1"), top.get("country")) if part
+    )
+    return {"latitude": top["latitude"], "longitude": top["longitude"], "label": label}
+
+
+# Public IP comes from ipify (https://www.ipify.org): free, no API key.
+_PUBLIC_IP_URL = "https://api.ipify.org"
+_IP_HTTP_TIMEOUT = 10.0
+
+
+def get_ip_address(kind: str = "both") -> str:
+    """Report this machine's IP address.
+
+    ``kind`` is 'local' (private LAN address), 'public' (internet-facing address),
+    or 'both' (default).
+    """
+    kind = (kind or "both").strip().lower()
+    if kind not in {"local", "public", "both"}:
+        return "kind must be 'local', 'public', or 'both'."
+
+    parts: list[str] = []
+    if kind in {"local", "both"}:
+        local = _local_ip()
+        parts.append(
+            f"Local (LAN) IP: {local}" if local else "Local (LAN) IP: unavailable"
+        )
+    if kind in {"public", "both"}:
+        parts.append(_public_ip_line())
+    return "\n".join(parts)
+
+
+def _local_ip() -> str | None:
+    """Best-effort private IP of the default network interface (no packets sent)."""
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        # Connecting a UDP socket doesn't send anything; it just picks the route
+        # the OS would use to reach a public address, revealing our local IP.
+        sock.connect(("8.8.8.8", 80))
+        return sock.getsockname()[0]
+    except OSError:
+        return None
+    finally:
+        sock.close()
+
+
+def _public_ip_line() -> str:
+    try:
+        with httpx.Client(timeout=_IP_HTTP_TIMEOUT) as client:
+            resp = client.get(_PUBLIC_IP_URL, params={"format": "json"})
+            resp.raise_for_status()
+            return f"Public IP: {resp.json()['ip']}"
+    except httpx.TimeoutException:
+        return "Public IP: lookup timed out."
+    except httpx.HTTPError as exc:
+        return f"Public IP: could not be determined ({exc})."
+
+
 # --- Registry ---------------------------------------------------------------
 
 TOOLS: list[Tool] = [
@@ -119,6 +286,48 @@ TOOLS: list[Tool] = [
             "required": ["expression"],
         },
         func=calculate,
+    ),
+    Tool(
+        name="get_weather",
+        description=(
+            "Get the current weather (temperature, conditions, humidity, wind) "
+            "for a city or place name."
+        ),
+        parameters={
+            "type": "object",
+            "properties": {
+                "location": {
+                    "type": "string",
+                    "description": "City or place name, e.g. 'Tokyo' or 'Austin, Texas'.",
+                },
+                "units": {
+                    "type": "string",
+                    "enum": ["metric", "imperial"],
+                    "description": "'metric' for °C/km/h (default) or 'imperial' for °F/mph.",
+                },
+            },
+            "required": ["location"],
+        },
+        func=get_weather,
+    ),
+    Tool(
+        name="get_ip_address",
+        description=(
+            "Get the IP address of the machine running this assistant — the local "
+            "LAN address, the public internet-facing address, or both."
+        ),
+        parameters={
+            "type": "object",
+            "properties": {
+                "kind": {
+                    "type": "string",
+                    "enum": ["local", "public", "both"],
+                    "description": "Which address to report. Defaults to 'both'.",
+                }
+            },
+            "required": [],
+        },
+        func=get_ip_address,
     ),
 ]
 
