@@ -34,7 +34,7 @@ console = Console()
 
 def _banner(agent: Agent) -> str:
     return (
-        f"[bold cyan]chat-ai[/] — a smart agent powered by "
+        f"[bold cyan]smarta-ai[/] — a smart agent powered by "
         f"[bold]{agent.config.provider}[/] ([italic]{agent.config.model}[/])\n"
         "Type your message, or [bold]/help[/] for commands. [bold]/exit[/] to quit."
     )

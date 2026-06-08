@@ -1,4 +1,4 @@
-# chat-ai
+# smarta-ai
 
 A smart, tool-using chat **agent** in Python that works with **any
 OpenAI-compatible LLM** — local models via [Ollama](https://ollama.com/),
@@ -6,22 +6,32 @@ OpenAI-compatible LLM** — local models via [Ollama](https://ollama.com/),
 and more. It ships configured for a **local Ollama** model (`llama3.2:3b`) so you
 can run it offline with no API key.
 
-It is a real agent, not just a wrapper: it keeps multi-turn memory, streams replies token-by-token, and can call tools (functions) to answer questions it can't answer from the model alone — e.g. the current time or arithmetic.
+It is a real agent, not just a wrapper: it keeps multi-turn memory, streams replies token-by-token, and can call tools (functions) to answer questions it can't answer from the model alone — the current time, arithmetic, live weather, web search, and this machine's IP.
 
 ## Features
 
 - 🔌 **Provider-agnostic** — switch backends with one env var. Local or hosted.
-- 🧠 **Multi-turn memory** with automatic context trimming so long chats stay cheap.
-- 🔧 **Tool calling** (OpenAI-compatible function calling) — easily add your own tools.
+- 🧠 **Token-budgeted memory** — when a long chat exceeds the context budget, the oldest turns are *summarized* into a running summary (compaction) rather than silently dropped, so older context is condensed instead of lost.
+- 🔧 **Tool calling** (OpenAI-compatible function calling) — ships with time, calculator, weather, web search, and IP-address tools, and adding your own is a few lines.
 - ⚡ **Streaming** responses for a responsive feel.
 - ⚙️ **Config via environment / `.env`** — no secrets in code.
 - 💾 **Save / reset** sessions from inside the chat.
 - 🧱 Clean, typed, modular code following Python best practices.
 
+## Built-in tools
+
+| Tool | What it does | Backend |
+| --- | --- | --- |
+| `get_current_time` | Current date/time in any IANA timezone | local |
+| `calculate` | Safe arithmetic (`+ - * / // % **`, parentheses) — no `eval` | local |
+| `get_weather` | Current conditions for a place (metric/imperial) | [Open-Meteo](https://open-meteo.com) (no key) |
+| `web_search` | Ranked results with titles, URLs, and snippets | Wikipedia (default, no key) or [Tavily](https://tavily.com) |
+| `get_ip_address` | This machine's local LAN and/or public IP | local + [ipify](https://www.ipify.org) |
+
 ## Project layout
 
 ```
-chat-ai/
+smarta-ai/
 ├── main.py                 # CLI entry point
 ├── chatbot/
 │   ├── config.py           # env-based configuration
@@ -76,6 +86,12 @@ ai › That's 3072.    (the agent called the `calculate` tool)
 
 you › and what time is it in Tokyo?
 ai › It's Sunday, 07 June 2026, 22:14:03 JST.   (called `get_current_time`)
+
+you › what's the weather in Paris right now?
+ai › Partly cloudy, 18°C (feels like 17°C)…   (called `get_weather`)
+
+you › who designed the Eiffel Tower?
+ai › Gustave Eiffel's company…   (called `web_search`)
 ```
 
 ## Choosing a different model or provider
@@ -91,6 +107,9 @@ Everything is driven by env vars (set them in `.env` or your shell):
 | `LLM_TEMPERATURE` | Sampling temperature | `0.7` |
 | `LLM_MAX_TOKENS` | Max tokens per reply | `2048` |
 | `LLM_TIMEOUT` | Request timeout (seconds) | `60` |
+| `LLM_MAX_CONTEXT_TOKENS` | Context budget; older turns are summarized past this | `6000` |
+| `SEARCH_PROVIDER` | `web_search` backend | `wikipedia` (default), `tavily` |
+| `SEARCH_API_KEY` | API key for the search backend (Tavily) | `tvly-...` |
 
 A few common setups:
 
@@ -108,6 +127,20 @@ LLM_PROVIDER=openai
 LLM_API_KEY=sk-...
 LLM_MODEL=gpt-4o-mini
 ```
+
+### Web search backend
+
+The `web_search` tool defaults to **Wikipedia** — free, no API key, and reliable
+for facts about topics, people, places, and organizations (but not live news).
+For full real-time web results, switch to **Tavily**:
+
+```bash
+SEARCH_PROVIDER=tavily
+SEARCH_API_KEY=tvly-your-key-here   # from https://tavily.com
+```
+
+Add more backends by registering a function in `_SEARCH_BACKENDS` in
+`chatbot/tools.py`.
 
 ### Adding a new provider
 
