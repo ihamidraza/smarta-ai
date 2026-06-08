@@ -133,11 +133,19 @@ class Agent:
             f"Current date and time: {now:%A, %d %B %Y, %H:%M %Z}.\n"
             f"Backend: provider '{self.config.provider}', model "
             f"'{self.config.model}'.\n"
-            "You can call these tools when they genuinely help:\n"
+            "Available tools:\n"
             f"{tools.describe()}\n"
-            "Prefer answering directly from your own knowledge; reach for a tool "
-            "only for live or computed data (e.g. current weather, the user's IP, "
-            "the exact time in a timezone, or arithmetic). Never invent tool output."
+            "Tool-use policy:\n"
+            "- Call `web_search` whenever the question is about specific facts, "
+            "people, places, organizations, or topics you are not confident about "
+            "or that may be outside your training. When unsure, search rather than "
+            "guess.\n"
+            "- Use `get_weather`, `get_ip_address`, `get_current_time`, and "
+            "`calculate` for that live or computed data.\n"
+            "- Answer directly only for general knowledge, reasoning, or chit-chat "
+            "that doesn't need fresh data.\n"
+            "Base answers on tool results when you use them, cite the source URLs "
+            "from `web_search`, and never invent tool output or links."
         )
 
     def _summarize(self, previous_summary: str, evicted: list[dict[str, Any]]) -> str:

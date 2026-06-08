@@ -16,9 +16,13 @@ import ast
 import datetime as _dt
 import json
 import operator as _op
+import os
+import re
 import socket
 from dataclasses import dataclass
+from html import unescape
 from typing import Any, Callable
+from urllib.parse import quote
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import httpx
@@ -254,6 +258,127 @@ def _public_ip_line() -> str:
         return f"Public IP: could not be determined ({exc})."
 
 
+# Web search. The default backend is Wikipedia: free, no API key, and reliable
+# for facts about topics, people, places, organizations, and things (but not live
+# news). For full real-time web results set SEARCH_PROVIDER=tavily and
+# SEARCH_API_KEY=... (https://tavily.com). Add more backends in _SEARCH_BACKENDS.
+_SEARCH_HTTP_TIMEOUT = 12.0
+_WIKIPEDIA_API_URL = "https://en.wikipedia.org/w/api.php"
+_TAVILY_URL = "https://api.tavily.com/search"
+# Wikipedia's API policy asks clients to identify themselves with a descriptive
+# User-Agent that includes a contact/app URL.
+_SEARCH_USER_AGENT = "smarta-ai/0.2 (https://github.com/ihamidraza/smarta-ai)"
+
+
+def web_search(query: str, max_results: int = 5) -> str:
+    """Search the web and return ranked result titles, URLs, and snippets."""
+    query = (query or "").strip()
+    if not query:
+        return "Please provide a search query."
+    try:
+        max_results = max(1, min(int(max_results), 10))
+    except (TypeError, ValueError):
+        max_results = 5
+
+    provider = os.getenv("SEARCH_PROVIDER", "wikipedia").strip().lower()
+    backend = _SEARCH_BACKENDS.get(provider)
+    if backend is None:
+        return (
+            f"Unknown SEARCH_PROVIDER {provider!r}. "
+            f"Available: {', '.join(sorted(_SEARCH_BACKENDS))}."
+        )
+
+    try:
+        with httpx.Client(timeout=_SEARCH_HTTP_TIMEOUT, follow_redirects=True) as client:
+            results = backend(client, query, max_results)
+    except ValueError as exc:  # configuration problem (e.g. missing key)
+        return f"Search configuration error: {exc}"
+    except httpx.TimeoutException:
+        return "The search request timed out. Please try again."
+    except httpx.HTTPError as exc:
+        return f"Could not reach the search service: {exc}"
+
+    if not results:
+        return f"No results found for {query!r}."
+    return _format_search_results(query, results)
+
+
+def _format_search_results(query: str, results: list[dict[str, str]]) -> str:
+    lines = [f"Top {len(results)} web result(s) for {query!r}:"]
+    for i, item in enumerate(results, 1):
+        title = (item.get("title") or "").strip() or "(untitled)"
+        entry = f"{i}. {title}"
+        if item.get("url"):
+            entry += f"\n   {item['url']}"
+        snippet = (item.get("snippet") or "").strip()
+        if snippet:
+            entry += f"\n   {snippet}"
+        lines.append(entry)
+    return "\n".join(lines)
+
+
+def _search_wikipedia(
+    client: httpx.Client, query: str, max_results: int
+) -> list[dict[str, str]]:
+    resp = client.get(
+        _WIKIPEDIA_API_URL,
+        params={
+            "action": "query",
+            "list": "search",
+            "srsearch": query,
+            "srlimit": max_results,
+            "srprop": "snippet",
+            "format": "json",
+        },
+        headers={"User-Agent": _SEARCH_USER_AGENT},
+    )
+    resp.raise_for_status()
+    hits = resp.json().get("query", {}).get("search", [])
+    results: list[dict[str, str]] = []
+    for hit in hits:
+        title = hit.get("title", "")
+        results.append(
+            {
+                "title": title,
+                "url": "https://en.wikipedia.org/wiki/" + quote(title.replace(" ", "_")),
+                "snippet": _strip_html(hit.get("snippet", "")),
+            }
+        )
+    return results
+
+
+def _strip_html(text: str) -> str:
+    """Remove HTML tags and decode entities from a Wikipedia snippet."""
+    return unescape(re.sub(r"<[^>]+>", "", text)).strip()
+
+
+def _search_tavily(
+    client: httpx.Client, query: str, max_results: int
+) -> list[dict[str, str]]:
+    api_key = os.getenv("SEARCH_API_KEY", "").strip()
+    if not api_key:
+        raise ValueError("SEARCH_API_KEY is required when SEARCH_PROVIDER=tavily.")
+    resp = client.post(
+        _TAVILY_URL,
+        json={"api_key": api_key, "query": query, "max_results": max_results},
+    )
+    resp.raise_for_status()
+    return [
+        {
+            "title": item.get("title") or "",
+            "url": item.get("url") or "",
+            "snippet": item.get("content") or "",
+        }
+        for item in (resp.json().get("results") or [])
+    ][:max_results]
+
+
+_SEARCH_BACKENDS: dict[str, Callable[[httpx.Client, str, int], list[dict[str, str]]]] = {
+    "wikipedia": _search_wikipedia,
+    "tavily": _search_tavily,
+}
+
+
 # --- Registry ---------------------------------------------------------------
 
 TOOLS: list[Tool] = [
@@ -328,6 +453,29 @@ TOOLS: list[Tool] = [
             "required": [],
         },
         func=get_ip_address,
+    ),
+    Tool(
+        name="web_search",
+        description=(
+            "Search the web for facts about topics, people, places, organizations, "
+            "or things you are unsure about. Returns result titles, URLs, and "
+            "snippets."
+        ),
+        parameters={
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "The search query, e.g. 'latest Mars rover news'.",
+                },
+                "max_results": {
+                    "type": "integer",
+                    "description": "How many results to return (1-10, default 5).",
+                },
+            },
+            "required": ["query"],
+        },
+        func=web_search,
     ),
 ]
 
