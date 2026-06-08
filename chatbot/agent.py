@@ -7,6 +7,7 @@ same code path serves every provider.
 
 from __future__ import annotations
 
+import datetime as dt
 import logging
 import time
 from collections.abc import Iterator
@@ -45,7 +46,11 @@ class Agent:
             base_url=self.config.base_url,
             timeout=self.config.request_timeout,
         )
-        self.conversation = Conversation(self.config.system_prompt)
+        self.conversation = Conversation(
+            self.config.system_prompt,
+            max_context_tokens=self.config.max_context_tokens,
+            summarizer=self._summarize,
+        )
 
     # -- Public API ----------------------------------------------------------
 
@@ -81,7 +86,7 @@ class Agent:
         try:
             stream = self._client.chat.completions.create(
                 model=self.config.model,
-                messages=self.conversation.to_api_messages(),
+                messages=self.conversation.to_api_messages(self._dynamic_context()),
                 temperature=self.config.temperature,
                 max_tokens=self.config.max_tokens,
                 tools=tools.schemas(),
@@ -104,7 +109,7 @@ class Agent:
         if wants_tool:
             # Roll back the streamed user turn already recorded, then re-run the
             # full tool-aware path so tool calls are handled correctly.
-            self.conversation._messages.pop()  # remove the user msg we just added
+            self.conversation.pop_last()  # remove the user msg we just added
             yield self.chat(user_input)
             return
 
@@ -114,13 +119,63 @@ class Agent:
         """Clear history (keeps the system prompt)."""
         self.conversation.reset()
 
+    # -- Context engineering -------------------------------------------------
+
+    def _dynamic_context(self) -> str:
+        """Fresh runtime context injected as a system message each turn.
+
+        Grounds the model in the current date/time and its actual tool catalog so
+        it neither hallucinates "today" nor calls a tool when a direct answer will
+        do. Built per turn so the date never goes stale within a session.
+        """
+        now = dt.datetime.now().astimezone()
+        return (
+            f"Current date and time: {now:%A, %d %B %Y, %H:%M %Z}.\n"
+            f"Backend: provider '{self.config.provider}', model "
+            f"'{self.config.model}'.\n"
+            "You can call these tools when they genuinely help:\n"
+            f"{tools.describe()}\n"
+            "Prefer answering directly from your own knowledge; reach for a tool "
+            "only for live or computed data (e.g. current weather, the user's IP, "
+            "the exact time in a timezone, or arithmetic). Never invent tool output."
+        )
+
+    def _summarize(self, previous_summary: str, evicted: list[dict[str, Any]]) -> str:
+        """Fold evicted messages into a concise running summary (compaction).
+
+        Used as the :class:`Conversation` summarizer. Runs as a standalone
+        completion (tools disabled, low temperature) and does not touch the live
+        conversation, so it cannot recurse into further compaction.
+        """
+        instruction = (
+            "You compact a chat transcript into a concise running summary that "
+            "preserves continuity. Keep facts, decisions, named entities, numbers, "
+            "and any unresolved questions or user preferences. Drop pleasantries and "
+            "filler. Return only the updated summary, a short paragraph or bullets."
+        )
+        request = (
+            f"Existing summary:\n{previous_summary or '(none yet)'}\n\n"
+            f"New messages to fold in:\n{_render_transcript(evicted)}\n\n"
+            "Return the updated summary only."
+        )
+        response = self._client.chat.completions.create(
+            model=self.config.model,
+            messages=[
+                {"role": "system", "content": instruction},
+                {"role": "user", "content": request},
+            ],
+            temperature=0.2,
+            max_tokens=512,
+        )
+        return response.choices[0].message.content or previous_summary
+
     # -- Internals -----------------------------------------------------------
 
     def _complete(self, use_tools: bool = True) -> Any:
         """One non-streaming completion; returns the assistant message object."""
         kwargs: dict[str, Any] = {
             "model": self.config.model,
-            "messages": self.conversation.to_api_messages(),
+            "messages": self.conversation.to_api_messages(self._dynamic_context()),
             "temperature": self.config.temperature,
             "max_tokens": self.config.max_tokens,
         }
@@ -153,6 +208,20 @@ class Agent:
             logger.info("tool call: %s(%s)", name, args)
             result = tools.dispatch(name, args)
             self.conversation.add_tool_result(call.id, result)
+
+
+def _render_transcript(messages: list[dict[str, Any]]) -> str:
+    """Flatten message dicts into a readable transcript for summarization."""
+    lines: list[str] = []
+    for msg in messages:
+        role = msg.get("role", "?")
+        content = (msg.get("content") or "").strip()
+        if content:
+            lines.append(f"{role}: {content}")
+        for call in msg.get("tool_calls") or []:
+            fn = call.get("function", {})
+            lines.append(f"{role} called tool {fn.get('name')}({fn.get('arguments')})")
+    return "\n".join(lines) if lines else "(no textual content)"
 
 
 class AgentError(RuntimeError):

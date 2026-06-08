@@ -339,6 +339,11 @@ def schemas() -> list[dict[str, Any]]:
     return [t.to_openai_schema() for t in TOOLS]
 
 
+def describe() -> str:
+    """A short bulleted catalog of tools, for grounding the system prompt."""
+    return "\n".join(f"- {t.name}: {t.description}" for t in TOOLS)
+
+
 def dispatch(name: str, arguments: str) -> str:
     """Run a tool by name with JSON-encoded ``arguments`` from the model."""
     tool = _BY_NAME.get(name)

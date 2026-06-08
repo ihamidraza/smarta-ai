@@ -33,6 +33,9 @@ class ConfigError(RuntimeError):
 _DEFAULT_TEMPERATURE = 0.7
 _DEFAULT_MAX_TOKENS = 2048
 _DEFAULT_TIMEOUT = 60.0
+# Input-side context budget (estimated tokens). When history exceeds this, the
+# oldest turns are summarized into a running summary instead of being dropped.
+_DEFAULT_MAX_CONTEXT_TOKENS = 6000
 _DEFAULT_SYSTEM_PROMPT = (
     "You are a helpful, friendly, and knowledgeable assistant. "
     "Answer clearly and concisely. When you use a tool, explain the result "
@@ -51,6 +54,7 @@ class Config:
     temperature: float = _DEFAULT_TEMPERATURE
     max_tokens: int = _DEFAULT_MAX_TOKENS
     request_timeout: float = _DEFAULT_TIMEOUT
+    max_context_tokens: int = _DEFAULT_MAX_CONTEXT_TOKENS
     system_prompt: str = _DEFAULT_SYSTEM_PROMPT
 
     @classmethod
@@ -85,6 +89,9 @@ class Config:
             temperature=_get_float("LLM_TEMPERATURE", _DEFAULT_TEMPERATURE),
             max_tokens=_get_int("LLM_MAX_TOKENS", _DEFAULT_MAX_TOKENS),
             request_timeout=_get_float("LLM_TIMEOUT", _DEFAULT_TIMEOUT),
+            max_context_tokens=_get_int(
+                "LLM_MAX_CONTEXT_TOKENS", _DEFAULT_MAX_CONTEXT_TOKENS
+            ),
         )
 
 
